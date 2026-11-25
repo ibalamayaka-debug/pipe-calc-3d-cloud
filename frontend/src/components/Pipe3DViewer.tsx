@@ -10,7 +10,7 @@ import vtkMapper from '@kitware/vtk.js/Rendering/Core/Mapper';
 import vtkActor from '@kitware/vtk.js/Rendering/Core/Actor';
 import vtkColorTransferFunction from '@kitware/vtk.js/Rendering/Core/ColorTransferFunction';
 import { ColorMode, ScalarMode } from '@kitware/vtk.js/Rendering/Core/Mapper/Constants';
-import { Box, Compass, Layers, Pause, Play } from 'lucide-react';
+import { Box, Compass, Layers, Pause, Play, Scissors } from 'lucide-react';
 import { TRANSLATIONS, type Lang } from '../i18n';
 import type { FieldId, PaletteId, PipeCalcResponse } from '../types';
 
@@ -20,6 +20,9 @@ interface Props {
   field: FieldId;
   palette: PaletteId;
   showWall: boolean;
+  wallOpacity: number;
+  cutaway: boolean;
+  onToggleCutaway: () => void;
   showLong: boolean;
   showCross: boolean;
   showStreams: boolean;
@@ -75,6 +78,29 @@ function parseVtp(buf: ArrayBuffer) {
   const r = vtkXMLPolyDataReader.newInstance();
   r.parseAsArrayBuffer(buf);
   return r.getOutputData(0);
+}
+
+function makeCutawayWall(fullPoly: ReturnType<typeof vtkPolyData.newInstance>) {
+  const pts = fullPoly.getPoints().getData() as Float32Array;
+  const polys = fullPoly.getPolys().getData() as Uint32Array;
+  const outPolys: number[] = [];
+  let i = 0;
+  while (i < polys.length) {
+    const n = polys[i];
+    let zSum = 0;
+    for (let k = 1; k <= n; k++) zSum += pts[polys[i + k] * 3 + 2];
+    if (zSum / n <= 0.0005) {
+      outPolys.push(n);
+      for (let k = 1; k <= n; k++) outPolys.push(polys[i + k]);
+    }
+    i += n + 1;
+  }
+  const cut = vtkPolyData.newInstance();
+  cut.shallowCopy(fullPoly);
+  const ca = vtkCellArray.newInstance();
+  ca.setData(new Uint32Array(outPolys));
+  cut.setPolys(ca);
+  return cut;
 }
 
 function activeRange(poly: ReturnType<typeof vtkPolyData.newInstance>, field: string): [number, number] {
@@ -214,7 +240,7 @@ async function getVtp(url: string) {
 }
 
 export const Pipe3DViewer: React.FC<Props> = ({
-  lang, result, field, palette, showWall, showLong, showCross, showStreams, showEdges, playing, onTogglePlay, loading,
+  lang, result, field, palette, showWall, wallOpacity, cutaway, onToggleCutaway, showLong, showCross, showStreams, showEdges, playing, onTogglePlay, loading,
 }) => {
   const t = TRANSLATIONS[lang];
   const langRef = useRef(lang); langRef.current = lang;
@@ -230,10 +256,10 @@ export const Pipe3DViewer: React.FC<Props> = ({
     longActor: ReturnType<typeof vtkActor.newInstance>; longMapper: ReturnType<typeof vtkMapper.newInstance>;
     crossActor: ReturnType<typeof vtkActor.newInstance>; crossMapper: ReturnType<typeof vtkMapper.newInstance>;
     streamActor: ReturnType<typeof vtkActor.newInstance>; streamMapper: ReturnType<typeof vtkMapper.newInstance>;
-    wallLut: ReturnType<typeof vtkColorTransferFunction.newInstance>;
     sliceLut: ReturnType<typeof vtkColorTransferFunction.newInstance>;
     longPoly: ReturnType<typeof vtkPolyData.newInstance> | null;
-    wallPoly: ReturnType<typeof vtkPolyData.newInstance> | null;
+    wallFullPoly: ReturnType<typeof vtkPolyData.newInstance> | null;
+    wallCutPoly: ReturnType<typeof vtkPolyData.newInstance> | null;
     animStream: AnimStream | null;
     uBounds: [number, number];
     loaded: boolean;
@@ -275,11 +301,16 @@ export const Pipe3DViewer: React.FC<Props> = ({
       m.setColorByArrayName(field);
       m.setScalarRange(lo, hi);
     }
-    if (s.wallPoly) {
-      const [wlo, whi] = activeRange(s.wallPoly, 'p_pa');
-      applyStops(s.wallLut, stops, wlo, whi);
+    const wp = cutaway ? s.wallCutPoly : s.wallFullPoly;
+    if (wp) {
+      const hasField = Boolean(wp.getPointData().getArrayByName(field));
+      const wField = hasField ? field : 'p_pa';
+      const [wlo, whi] = hasField ? [lo, hi] : activeRange(wp, 'p_pa');
+      s.wallMapper.setInputData(wp);
+      s.wallMapper.setColorByArrayName(wField);
       s.wallMapper.setScalarRange(wlo, whi);
     }
+    s.wallActor.getProperty().setOpacity(wallOpacity);
     s.wallActor.setVisibility(showWall);
     s.longActor.setVisibility(showLong);
     s.crossActor.setVisibility(showCross);
@@ -288,7 +319,7 @@ export const Pipe3DViewer: React.FC<Props> = ({
     if (s.animStream) updateStreamColors(s.animStream, clockRef.current, s.uBounds[0], s.uBounds[1], palette);
     s.streamActor.setVisibility(showStreams);
     s.grw.getRenderWindow().render();
-  }, [field, palette, showWall, showLong, showCross, showStreams, showEdges]);
+  }, [field, palette, showWall, wallOpacity, cutaway, showLong, showCross, showStreams, showEdges]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -297,7 +328,6 @@ export const Pipe3DViewer: React.FC<Props> = ({
     const grw = vtkGenericRenderWindow.newInstance({ background: [0.102, 0.08, 0.065] });
     grw.setContainer(el); grw.resize();
     const ren = grw.getRenderer();
-    const wallLut = vtkColorTransferFunction.newInstance();
     const sliceLut = vtkColorTransferFunction.newInstance();
 
     const mkActor = (lut: ReturnType<typeof vtkColorTransferFunction.newInstance>, opacity: number, lighting: boolean, arrName?: string) => {
@@ -307,12 +337,13 @@ export const Pipe3DViewer: React.FC<Props> = ({
       if (arrName) m.setColorByArrayName(arrName);
       const a = vtkActor.newInstance(); a.setMapper(m); a.setVisibility(false);
       a.getProperty().setOpacity(opacity); a.getProperty().setLighting(lighting);
+      a.getProperty().setAmbient(0.36); a.getProperty().setDiffuse(0.68); a.getProperty().setSpecular(0.32); a.getProperty().setSpecularPower(22);
       a.getProperty().setEdgeColor(0.16, 0.11, 0.08);
       ren.addActor(a);
       return [a, m] as const;
     };
-    const [wallActor, wallMapper] = mkActor(wallLut, 0.25, true, 'p_pa');
-    const [longActor, longMapper] = mkActor(sliceLut, 0.88, false);
+    const [wallActor, wallMapper] = mkActor(sliceLut, 0.90, true, 'U_mag');
+    const [longActor, longMapper] = mkActor(sliceLut, 0.90, false);
     const [crossActor, crossMapper] = mkActor(sliceLut, 0.96, false);
 
     const streamMapper = vtkMapper.newInstance();
@@ -320,7 +351,7 @@ export const Pipe3DViewer: React.FC<Props> = ({
     const streamActor = vtkActor.newInstance(); streamActor.setMapper(streamMapper); streamActor.setVisibility(false); streamActor.getProperty().setLighting(false);
     ren.addActor(streamActor);
 
-    sceneRef.current = { grw, wallActor, wallMapper, longActor, longMapper, crossActor, crossMapper, streamActor, streamMapper, wallLut, sliceLut, longPoly: null, wallPoly: null, animStream: null, uBounds: [0.1, 2], loaded: false };
+    sceneRef.current = { grw, wallActor, wallMapper, longActor, longMapper, crossActor, crossMapper, streamActor, streamMapper, sliceLut, longPoly: null, wallFullPoly: null, wallCutPoly: null, animStream: null, uBounds: [0.1, 2], loaded: false };
     const ro = new ResizeObserver(() => { if (!disposed) grw.resize(); });
     ro.observe(el);
 
@@ -351,9 +382,11 @@ export const Pipe3DViewer: React.FC<Props> = ({
         ]);
         if (cancelled || !sceneRef.current) return;
         const s = sceneRef.current;
-        const wallPoly = parseVtp(wb), longPoly = parseVtp(lb), crossPoly = parseVtp(cb);
-        s.wallPoly = wallPoly; s.longPoly = longPoly;
-        s.wallMapper.setInputData(wallPoly); s.longMapper.setInputData(longPoly); s.crossMapper.setInputData(crossPoly);
+        const wallFullPoly = parseVtp(wb), longPoly = parseVtp(lb), crossPoly = parseVtp(cb);
+        s.wallFullPoly = wallFullPoly;
+        s.wallCutPoly = makeCutawayWall(wallFullPoly);
+        s.longPoly = longPoly;
+        s.longMapper.setInputData(longPoly); s.crossMapper.setInputData(crossPoly);
 
         const [uLo, uHi] = activeRange(longPoly, 'U_mag');
         s.uBounds = [uLo, uHi];
@@ -370,7 +403,7 @@ export const Pipe3DViewer: React.FC<Props> = ({
     return () => { cancelled = true; };
   }, [result, setCam, syncVisuals]);
 
-  useEffect(() => { if (result && sceneRef.current?.loaded) syncVisuals(); }, [result, field, palette, showWall, showLong, showCross, showStreams, showEdges, syncVisuals]);
+  useEffect(() => { if (result && sceneRef.current?.loaded) syncVisuals(); }, [result, field, palette, showWall, wallOpacity, cutaway, showLong, showCross, showStreams, showEdges, syncVisuals]);
 
   const dec = Math.abs(range[1] - range[0]) < 1 ? 3 : 2;
   return (
@@ -379,6 +412,9 @@ export const Pipe3DViewer: React.FC<Props> = ({
       <div className="viewer-toolbar">
         <button type="button" className={playing ? 'active' : ''} onClick={onTogglePlay}>
           {playing ? <Pause size={14} /> : <Play size={14} />} {playing ? t.pause : t.play}
+        </button>
+        <button type="button" className={cutaway ? 'active' : ''} onClick={onToggleCutaway}>
+          <Scissors size={14} /> {cutaway ? t.fullPipeBtn : t.cutawayBtn}
         </button>
         <button type="button" onClick={() => setCam('iso', result)}><Box size={14} /> {t.camIso}</button>
         <button type="button" onClick={() => setCam('side', result)}><Layers size={14} /> {t.camSide}</button>

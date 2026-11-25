@@ -75,6 +75,8 @@ export const App: React.FC = () => {
   const [field, setField] = useState<FieldId>('U_mag');
   const [palette, setPalette] = useState<PaletteId>('rainbow');
   const [showWall, setShowWall] = useState(true);
+  const [wallOpacity, setWallOpacity] = useState(0.9);
+  const [cutaway, setCutaway] = useState(false);
   const [showLong, setShowLong] = useState(true);
   const [showCross, setShowCross] = useState(true);
   const [showStreams, setShowStreams] = useState(true);
@@ -264,6 +266,10 @@ export const App: React.FC = () => {
           </div>
           <div className="toggle-list">
             <label className="checkbox-row"><input type="checkbox" checked={showWall} onChange={(e) => setShowWall(e.target.checked)} /><span>{t.showWall}</span></label>
+            <label className="input-row">
+              <div className="input-head"><span>{t.wallOpacity}</span><strong>{Math.round(wallOpacity * 100)}%</strong></div>
+              <input type="range" min={0.2} max={1.0} step={0.05} value={wallOpacity} onChange={(e) => setWallOpacity(Number(e.target.value))} />
+            </label>
             <label className="checkbox-row"><input type="checkbox" checked={showLong} onChange={(e) => setShowLong(e.target.checked)} /><span>{t.showLong}</span></label>
             <label className="checkbox-row"><input type="checkbox" checked={showCross} onChange={(e) => setShowCross(e.target.checked)} /><span>{t.showCross}</span></label>
             <label className="checkbox-row"><input type="checkbox" checked={showStreams} onChange={(e) => setShowStreams(e.target.checked)} /><span>{t.showStreams}</span></label>
@@ -318,7 +324,9 @@ export const App: React.FC = () => {
         <div className="viewer-wrapper">
           <Pipe3DViewer
             lang={lang} result={result} field={field} palette={palette}
-            showWall={showWall} showLong={showLong} showCross={showCross}
+            showWall={showWall} wallOpacity={wallOpacity} cutaway={cutaway}
+            onToggleCutaway={() => setCutaway((v) => !v)}
+            showLong={showLong} showCross={showCross}
             showStreams={showStreams} showEdges={showEdges} playing={playing}
             onTogglePlay={() => setPlaying((v) => !v)} loading={loading}
           />

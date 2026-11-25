@@ -438,10 +438,50 @@ boundaryField { inlet { type calculated; value uniform 0; } outlet { type calcul
         c2pw.SetInputData(rw.GetOutput())
         c2pw.Update()
         wall_poly = c2pw.GetOutput()
+        w_pts = vtk_to_numpy(wall_poly.GetPoints().GetData()).astype(np.float64)
         wp_pa = vtk_to_numpy(wall_poly.GetPointData().GetArray("p")) * rho
         wp_v = numpy_to_vtk(wp_pa.astype(np.float32), deep=True)
         wp_v.SetName("p_pa")
         wall_poly.GetPointData().AddArray(wp_v)
+
+        # Probe near-wall boundary-layer velocity & TKE at r = 0.84*R inside the pipe onto ALL 3D wall nodes!
+        if params.geometry == "straight":
+            centers = np.column_stack([w_pts[:, 0], np.zeros(len(w_pts)), np.zeros(len(w_pts))])
+        else:
+            centers = np.zeros_like(w_pts)
+            m_in = w_pts[:, 0] < 0.0
+            m_out = (~m_in) & (w_pts[:, 1] <= 0.0)
+            m_arc = (~m_in) & (~m_out)
+            centers[m_in, 0] = w_pts[m_in, 0]
+            centers[m_in, 1] = r_b_e
+            centers[m_out, 0] = r_b_e
+            centers[m_out, 1] = w_pts[m_out, 1]
+            ang_r = np.maximum(np.hypot(w_pts[m_arc, 0], w_pts[m_arc, 1]), 1e-6)
+            centers[m_arc, 0] = r_b_e * w_pts[m_arc, 0] / ang_r
+            centers[m_arc, 1] = r_b_e * w_pts[m_arc, 1] / ang_r
+
+        probe_pts = w_pts - 0.16 * (w_pts - centers)
+        pr_poly = vtk.vtkPolyData()
+        pr_vpts = vtk.vtkPoints()
+        pr_vpts.SetData(numpy_to_vtk(probe_pts.astype(np.float32), deep=True))
+        pr_poly.SetPoints(pr_vpts)
+        prober_w = vtk.vtkProbeFilter()
+        prober_w.SetInputData(pr_poly)
+        prober_w.SetSourceData(ug_pt)
+        prober_w.Update()
+        pw_pd = prober_w.GetOutput().GetPointData()
+        uw_arr = pw_pd.GetArray("U")
+        if uw_arr is not None:
+            wu_mag = np.linalg.norm(vtk_to_numpy(uw_arr), axis=1).astype(np.float32)
+        else:
+            wu_mag = np.full(len(w_pts), U_mean * 0.85, dtype=np.float32)
+        kw_arr = pw_pd.GetArray("k")
+        wk_np = vtk_to_numpy(kw_arr).astype(np.float32) if kw_arr is not None else np.zeros(len(w_pts), dtype=np.float32)
+
+        for nm, arr in (("U_mag", wu_mag), ("k_turb", wk_np)):
+            va = numpy_to_vtk(arr, deep=True)
+            va.SetName(nm)
+            wall_poly.GetPointData().AddArray(va)
 
         def add_derived_fields(poly):
             pd = poly.GetPointData()
@@ -632,7 +672,7 @@ boundaryField { inlet { type calculated; value uniform 0; } outlet { type calcul
             streams_poly.GetPointData().SetScalars(au)
 
         files_content = {
-            "wall.vtp": _poly_to_ascii(_keep_only(wall_poly, ("p_pa",))),
+            "wall.vtp": _poly_to_ascii(_keep_only(wall_poly, ("U_mag", "p_pa", "k_turb"))),
             "slice_long.vtp": _poly_to_ascii(_keep_only(slice_long, ("U_mag", "p_pa", "k_turb"))),
             "slice_cross.vtp": _poly_to_ascii(_keep_only(slice_cross, ("U_mag", "p_pa", "k_turb"))),
             "streamlines.vtp": _poly_to_ascii(streams_poly),
