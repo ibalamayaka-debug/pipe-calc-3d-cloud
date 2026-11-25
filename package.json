@@ -1,0 +1,27 @@
+{
+  "name": "pipe-calc-3d-cloud",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cf dev",
+    "build": "cf build",
+    "deploy": "cf deploy --prebuilt --secrets-file .env.secrets",
+    "typecheck": "cf workers types && tsc --noEmit"
+  },
+  "dependencies": {
+    "@kitware/vtk.js": "^32.10.0",
+    "lucide-react": "^0.469.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^2.0.0-rc.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "cf": "^1.0.0-rc.2",
+    "typescript": "^5.7.2",
+    "vite": "^7.0.0"
+  }
+}
